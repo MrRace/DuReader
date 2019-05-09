@@ -71,6 +71,8 @@ class RCModel(object):
 
         # save info
         self.saver = tf.train.Saver()
+        self.train_writer = tf.summary.FileWriter(args.summary_dir, self.sess.graph)
+        # self.bleu_writer = tf.summary.FileWriter(os.path.join(estimator.model_dir, BLEU_DIR))
 
         # initialize the model
         self.sess.run(tf.global_variables_initializer())
@@ -215,16 +217,19 @@ class RCModel(object):
             raise NotImplementedError('Unsupported optimizer: {}'.format(self.optim_type))
         self.train_op = self.optimizer.minimize(self.loss)
 
-    def _train_epoch(self, train_batches, dropout_keep_prob):
+    def _train_epoch(self, train_batches, dropout_keep_prob, merged, index_step):
         """
         Trains the model for a single epoch.
         Args:
             train_batches: iterable batch data for training
             dropout_keep_prob: float value indicating dropout keep probability
+            新增参数
+            记录每个epoch的损失值，方便借助tensorboard绘制损失曲线
         """
         total_num, total_loss = 0, 0
         log_every_n_batch, n_batch_loss = 50, 0
         for bitx, batch in enumerate(train_batches, 1):
+            # print("bitx=", bitx)
             feed_dict = {self.p: batch['passage_token_ids'],
                          self.q: batch['question_token_ids'],
                          self.p_length: batch['passage_length'],
@@ -232,10 +237,14 @@ class RCModel(object):
                          self.start_label: batch['start_id'],
                          self.end_label: batch['end_id'],
                          self.dropout_keep_prob: dropout_keep_prob}
-            _, loss = self.sess.run([self.train_op, self.loss], feed_dict)
+            _, loss, summary = self.sess.run([self.train_op, self.loss, merged], feed_dict)
             total_loss += loss * len(batch['raw_data'])
             total_num += len(batch['raw_data'])
             n_batch_loss += loss
+            # summary = self.sess.run(merged, feed_dict)
+            self.train_writer.add_summary(summary, index_step+bitx)
+            # print("total_step=", index_step+bitx)
+
             if log_every_n_batch > 0 and bitx % log_every_n_batch == 0:
                 self.logger.info('Average loss from batch {} to {} is {}'.format(
                     bitx - log_every_n_batch + 1, bitx, n_batch_loss / log_every_n_batch))
@@ -254,22 +263,40 @@ class RCModel(object):
             save_prefix: the prefix indicating the model type
             dropout_keep_prob: float value indicating dropout keep probability
             evaluate: whether to evaluate the model on test set after each epoch
+        不用计算train set error??再比较Dev set error??
         """
         pad_id = self.vocab.get_id(self.vocab.pad_token)
         max_bleu_4 = 0
+
+        tf.summary.scalar('loss', self.loss)#记录需要后期需要可视化的指标
+        merged = tf.summary.merge_all()
+
+        total_batch = int(len(data.train_set) / batch_size) + 1
         for epoch in range(1, epochs + 1):
+            batch_num = 0
             self.logger.info('Training the model for epoch {}'.format(epoch))
             train_batches = data.gen_mini_batches('train', batch_size, pad_id, shuffle=True)
-            train_loss = self._train_epoch(train_batches, dropout_keep_prob)
+            index_step = (epoch-1) * total_batch
+            # print("train_batches=", len(train_batches))
+            # print("total_batch size=", total_batch)
+            train_loss = self._train_epoch(train_batches, dropout_keep_prob, merged, index_step)
             self.logger.info('Average train loss for epoch {} is {}'.format(epoch, train_loss))
 
             if evaluate:
                 self.logger.info('Evaluating the model after epoch {}'.format(epoch))
+
+
                 if data.dev_set is not None:
                     eval_batches = data.gen_mini_batches('dev', batch_size, pad_id, shuffle=False)
                     eval_loss, bleu_rouge = self.evaluate(eval_batches)
                     self.logger.info('Dev eval loss {}'.format(eval_loss))
                     self.logger.info('Dev eval result: {}'.format(bleu_rouge))
+
+                    summary = tf.Summary(value=[
+                        tf.Summary.Value(tag="Rouge-L", simple_value=bleu_rouge['Rouge-L']),
+                        tf.Summary.Value(tag="Bleu-4", simple_value=bleu_rouge['Bleu-4']),
+                    ])
+                    self.train_writer.add_summary(summary, epoch)
 
                     if bleu_rouge['Bleu-4'] > max_bleu_4:
                         self.save(save_dir, save_prefix)
@@ -309,6 +336,7 @@ class RCModel(object):
             for sample, start_prob, end_prob in zip(batch['raw_data'], start_probs, end_probs):
 
                 best_answer = self.find_best_answer(sample, start_prob, end_prob, padded_p_len)
+                #这种方式的答案是从原文选择一个片段
                 if save_full_info:
                     sample['pred_answers'] = [best_answer]
                     pred_answers.append(sample)

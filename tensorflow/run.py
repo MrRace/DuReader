@@ -27,6 +27,8 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import pickle
 import argparse
 import logging
+import pdb
+from utils.pretrain_embedding import pre_train
 from dataset import BRCDataset
 from vocab import Vocab
 from rc_model import RCModel
@@ -39,6 +41,8 @@ def parse_args():
     parser = argparse.ArgumentParser('Reading Comprehension on BaiduRC dataset')
     parser.add_argument('--prepare', action='store_true',
                         help='create the directories, prepare the vocabulary and embeddings')
+    parser.add_argument('--pretrain', action='store_true',
+                        help='pretrain word embeddings')
     parser.add_argument('--train', action='store_true',
                         help='train the model')
     parser.add_argument('--evaluate', action='store_true',
@@ -47,6 +51,8 @@ def parse_args():
                         help='predict the answers for test set with trained model')
     parser.add_argument('--gpu', type=str, default='0',
                         help='specify gpu device')
+    parser.add_argument('--dump_preprocessed_data', action='store_true',
+                        help='dump preprocessed data,delete useless fields')
 
     train_settings = parser.add_argument_group('train settings')
     train_settings.add_argument('--optim', default='adam',
@@ -80,14 +86,20 @@ def parse_args():
 
     path_settings = parser.add_argument_group('path settings')
     path_settings.add_argument('--train_files', nargs='+',
-                               default=['../data/demo/trainset/search.train.json'],
+                               default=['../data/DuReader2.0/trainset/search.train.json'],
                                help='list of files that contain the preprocessed train data')
     path_settings.add_argument('--dev_files', nargs='+',
-                               default=['../data/demo/devset/search.dev.json'],
+                               default=['../data/DuReader2.0/devset/search.dev.json'],
                                help='list of files that contain the preprocessed dev data')
     path_settings.add_argument('--test_files', nargs='+',
-                               default=['../data/demo/testset/search.test.json'],
+                               default=['../data/DuReader2.0/testset/search.test.json'],
                                help='list of files that contain the preprocessed test data')
+    path_settings.add_argument('--prepared_dir', default='../data/prepared',
+                               help='the dir to store prepared ')
+    path_settings.add_argument('--segmented_dir', default='../data/segmented',
+                               help='the dir to store segmented sentences')
+    path_settings.add_argument('--pretrained_word_path', default=None,
+                               help='the pretrained word_embedding file ')
     path_settings.add_argument('--brc_dir', default='../data/baidu',
                                help='the dir with preprocessed baidu reading comprehension data')
     path_settings.add_argument('--vocab_dir', default='../data/vocab/',
@@ -103,22 +115,29 @@ def parse_args():
     return parser.parse_args()
 
 
+
 def prepare(args):
     """
     checks data, creates the directories, prepare the vocabulary and embeddings
     """
     logger = logging.getLogger("brc")
     logger.info('Checking the data files...')
-    for data_path in args.train_files + args.dev_files + args.test_files:
+    whole_filelist = []
+    whole_filelist.extend(args.train_files)
+    whole_filelist.extend(args.dev_files)
+    whole_filelist.extend(args.test_files)
+    for data_path in whole_filelist:
+        print("data_path=", data_path)
         assert os.path.exists(data_path), '{} file does not exist.'.format(data_path)
     logger.info('Preparing the directories...')
-    for dir_path in [args.vocab_dir, args.model_dir, args.result_dir, args.summary_dir]:
+    for dir_path in [args.prepared_dir, args.segmented_dir, args.vocab_dir, args.model_dir, args.result_dir, args.summary_dir]:
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
 
     logger.info('Building vocabulary...')
     brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len,
-                          args.train_files, args.dev_files, args.test_files)
+                          args.train_files, args.dev_files, args.test_files, args.prepared_dir, prepare=True)
+    # 此时占用内存27GB
     vocab = Vocab(lower=True)
     for word in brc_data.word_iter('train'):
         vocab.add(word)
@@ -130,14 +149,45 @@ def prepare(args):
                                                                             vocab.size()))
 
     logger.info('Assigning embeddings...')
-    vocab.randomly_init_embeddings(args.embed_size)
+    if args.pretrain:
+        # 基于已有的分词结果训练词向量
+        if args.pretrained_word_path:
+            # 如果指定了预训练路径，则不需要重新训练，否则根据给定的语料重新训练
+            vocab.load_pretrained_embeddings(args.pretrained_word_path)
+        else:
+            # 训练耗时20分钟左右
+            pre_train(brc_data, args.segmented_dir)
+            vocab.load_pretrained_embeddings(os.path.join(args.segmented_dir, 'w2v_dic.data'))
+    else:
+        vocab.randomly_init_embeddings(args.embed_size)
 
     logger.info('Saving vocab...')
     with open(os.path.join(args.vocab_dir, 'vocab.data'), 'wb') as fout:
         pickle.dump(vocab, fout)
+    del vocab
+    pdb.set_trace()
+    if args.dump_preprocessed_data:
+        logger.info('Dump preprocessed datasets...')
+        # 注意，如果BRCDataset初始化时候没有清空无关字段，则dump结果过大
+        with open(os.path.join(args.prepared_dir, 'train_set.pkl'), 'wb') as f_train_out:
+            pickle.dump(brc_data.train_set, f_train_out)
+        del brc_data.train_set
+        logger.info('Dump train_set.pkl...')
+
+        with open(os.path.join(args.prepared_dir, 'dev_set.pkl'), 'wb') as f_dev_out:
+            pickle.dump(brc_data.dev_set, f_dev_out)
+        del brc_data.dev_set
+        logger.info('Dump dev_set.pkl...')
+
+        with open(os.path.join(args.prepared_dir, 'test_set.pkl'), 'wb') as f_test_out:
+            pickle.dump(brc_data.test_set, f_test_out)
+        del brc_data.test_set
+        logger.info('Dump test_set.pkl...')
+
 
     logger.info('Done with preparing!')
 
+# 如果采用外部词向量是否加快？？
 
 def train(args):
     """
@@ -148,7 +198,7 @@ def train(args):
     with open(os.path.join(args.vocab_dir, 'vocab.data'), 'rb') as fin:
         vocab = pickle.load(fin)
     brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len,
-                          args.train_files, args.dev_files)
+                          args.train_files, args.dev_files, prepared_dir=args.prepared_dir)
     logger.info('Converting text into ids...')
     brc_data.convert_to_ids(vocab)
     logger.info('Initialize the model...')
@@ -169,7 +219,7 @@ def evaluate(args):
     with open(os.path.join(args.vocab_dir, 'vocab.data'), 'rb') as fin:
         vocab = pickle.load(fin)
     assert len(args.dev_files) > 0, 'No dev files are provided.'
-    brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len, dev_files=args.dev_files)
+    brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len, dev_files=args.dev_files, prepared_dir=args.prepared_dir)
     logger.info('Converting text into ids...')
     brc_data.convert_to_ids(vocab)
     logger.info('Restoring the model...')
@@ -195,7 +245,7 @@ def predict(args):
         vocab = pickle.load(fin)
     assert len(args.test_files) > 0, 'No test files are provided.'
     brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len,
-                          test_files=args.test_files)
+                          test_files=args.test_files, prepared_dir=args.prepared_dir)
     logger.info('Converting text into ids...')
     brc_data.convert_to_ids(vocab)
     logger.info('Restoring the model...')
