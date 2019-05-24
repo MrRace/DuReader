@@ -121,6 +121,7 @@ class BRCDataset(object):
                         for para_info in para_infos[:1]:
                             fake_passage_tokens += para_info[0]
                         sample['passages'].append({'passage_tokens': fake_passage_tokens})
+                del sample['documents']
                 data_set.append(sample)
         return data_set
 
@@ -212,11 +213,23 @@ class BRCDataset(object):
         Args:
             vocab: the vocabulary on this dataset
         """
-        for data_set in [self.train_set, self.dev_set, self.test_set]:
+        for data_set in [self.train_set]:
             if data_set is None:
                 continue
             for sample in data_set:
                 sample['question_token_ids'] = vocab.convert_to_ids(sample['question_tokens'])
+                del sample['question_tokens']
+                for passage in sample['passages']:
+                    passage['passage_token_ids'] = vocab.convert_to_ids(passage['passage_tokens'])
+                    del passage['passage_tokens']
+                    # dev set 是要保留这些信息的
+
+        for data_set in [self.dev_set, self.test_set]:
+            if data_set is None:
+                continue
+            for sample in data_set:
+                sample['question_token_ids'] = vocab.convert_to_ids(sample['question_tokens'])
+                del sample['question_tokens']
                 for passage in sample['passages']:
                     passage['passage_token_ids'] = vocab.convert_to_ids(passage['passage_tokens'])
 
@@ -247,6 +260,43 @@ class BRCDataset(object):
             batch_indices = indices[batch_start: batch_start + batch_size]
             yield self._one_mini_batch(data, batch_indices, pad_id)
 
+    def save_segments(self, seg_dir, train_files=[], dev_files=[], test_files=[]):
+        """
+        直接存放对应的分词结果。同时清空无用的变量
+        """
+        if train_files:
+            out_file = os.path.join(seg_dir, 'train_set.seg')
+            with open(out_file, 'w', encoding='utf8') as ftrain:
+                for sample in self.train_set:
+                    ftrain.write(' '.join(sample['segmented_question']) + '\n')
+                    for passage in sample['passages']:
+                        ftrain.write(' '.join(passage['passage_tokens']) + '\n')
+                    del sample
+
+            del self.train_set
+
+        if dev_files:
+            out_file = os.path.join(seg_dir, 'dev_set.seg')
+            with open(out_file, 'w', encoding='utf8') as fdev:
+                for sample in self.dev_set:
+                    fdev.write(' '.join(sample['segmented_question']) + '\n')
+                    for passage in sample['passages']:
+                        fdev.write(' '.join(passage['passage_tokens']) + '\n')
+                    del sample
+            fdev.close()
+            del self.dev_set
+
+        if test_files:
+            out_file = os.path.join(seg_dir, 'test_set.seg')
+            with open(out_file, 'w', encoding='utf8') as ftest:
+                for sample in self.test_set:
+                    ftest.write(' '.join(sample['segmented_question']) + '\n')
+                    for passage in sample['passages']:
+                        ftest.write(' '.join(passage['passage_tokens']) + '\n')
+                    del sample
+            ftest.close()
+            del self.test_set
+
 
 class RCDataset(object):
     """
@@ -267,7 +317,7 @@ class RCDataset(object):
             if prepare:
                 for train_file in train_files:
                     self.logger.info("train_file={}".format(train_file))
-                    self.train_set += self._load_dataset(train_file, train=True)
+                    self.train_set += self._save_dataset_tfrecord(train_file, train=True)
                 self.logger.info('Train set size: {} questions.'.format(len(self.train_set)))
             else:
                 with open(os.path.join(prepared_dir, "train_set.tfrecord"), 'rb') as f_train_in:
@@ -292,12 +342,13 @@ class RCDataset(object):
                 with open(os.path.join(prepared_dir, "test_set.tfrecord"), 'rb') as f_test_in:
                     self.test_set = pkl.load(f_test_in)
 
-    def _load_dataset(self, data_path, train=False):
+    def _save_dataset_tfrecord(self, data_path, train=False):
         """
         Loads the dataset
         Args:
             data_path: the data file to load
-        注意，这里将无关的字段清空，以免dump时候
+        注意，这里将无关的字段清空，以免dump时候。
+        这里需要保留的字段：answer_spans、answers、answer_docs、segmented_question、
         """
         with open(data_path, encoding="utf-8") as fin:
             data_set = []
@@ -348,6 +399,10 @@ class RCDataset(object):
                         sample['passages'].append({'passage_tokens': fake_passage_tokens})
                 data_set.append(sample)
         return data_set
+
+    def _load_dataset_tfrecord(self):
+
+        pass
 
     def _one_mini_batch(self, data, indices, pad_id):
         """

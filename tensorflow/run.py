@@ -122,18 +122,18 @@ def prepare(args):
     """
     logger = logging.getLogger("brc")
     logger.info('Checking the data files...')
-    whole_filelist = []
-    whole_filelist.extend(args.train_files)
-    whole_filelist.extend(args.dev_files)
-    whole_filelist.extend(args.test_files)
-    for data_path in whole_filelist:
+    for data_path in args.train_files + args.dev_files + args.test_files:
         print("data_path=", data_path)
         assert os.path.exists(data_path), '{} file does not exist.'.format(data_path)
+
     logger.info('Preparing the directories...')
     for dir_path in [args.prepared_dir, args.segmented_dir, args.vocab_dir, args.model_dir, args.result_dir, args.summary_dir]:
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
 
+    """
+    基于原始数据创建词典及其词向量，这里的词向量采用的默认的随机初始化方式
+    """
     logger.info('Building vocabulary...')
     brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len,
                           args.train_files, args.dev_files, args.test_files, args.prepared_dir, prepare=True)
@@ -156,7 +156,7 @@ def prepare(args):
             vocab.load_pretrained_embeddings(args.pretrained_word_path)
         else:
             # 训练耗时20分钟左右
-            pre_train(brc_data, args.segmented_dir)
+            # pre_train(brc_data, args.segmented_dir, embed_size)
             vocab.load_pretrained_embeddings(os.path.join(args.segmented_dir, 'w2v_dic.data'))
     else:
         vocab.randomly_init_embeddings(args.embed_size)
@@ -165,7 +165,7 @@ def prepare(args):
     with open(os.path.join(args.vocab_dir, 'vocab.data'), 'wb') as fout:
         pickle.dump(vocab, fout)
     del vocab
-    pdb.set_trace()
+    # pdb.set_trace()
     if args.dump_preprocessed_data:
         logger.info('Dump preprocessed datasets...')
         # 注意，如果BRCDataset初始化时候没有清空无关字段，则dump结果过大
@@ -198,9 +198,11 @@ def train(args):
     with open(os.path.join(args.vocab_dir, 'vocab.data'), 'rb') as fin:
         vocab = pickle.load(fin)
     brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len,
-                          args.train_files, args.dev_files, prepared_dir=args.prepared_dir)
+                          args.train_files, args.dev_files, prepared_dir=args.prepared_dir, prepare=True)
+    # prepare=True是为了直接从原始数据加载，而不加载此前dump的文件
     logger.info('Converting text into ids...')
     brc_data.convert_to_ids(vocab)
+    # pdb.set_trace()
     logger.info('Initialize the model...')
     rc_model = RCModel(vocab, args)
     logger.info('Training the model...')
@@ -219,7 +221,8 @@ def evaluate(args):
     with open(os.path.join(args.vocab_dir, 'vocab.data'), 'rb') as fin:
         vocab = pickle.load(fin)
     assert len(args.dev_files) > 0, 'No dev files are provided.'
-    brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len, dev_files=args.dev_files, prepared_dir=args.prepared_dir)
+    brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len, dev_files=args.dev_files,
+                          prepared_dir=args.prepared_dir, prepare=True)
     logger.info('Converting text into ids...')
     brc_data.convert_to_ids(vocab)
     logger.info('Restoring the model...')
@@ -245,7 +248,7 @@ def predict(args):
         vocab = pickle.load(fin)
     assert len(args.test_files) > 0, 'No test files are provided.'
     brc_data = BRCDataset(args.max_p_num, args.max_p_len, args.max_q_len,
-                          test_files=args.test_files, prepared_dir=args.prepared_dir)
+                          test_files=args.test_files, prepared_dir=args.prepared_dir, prepare=True)
     logger.info('Converting text into ids...')
     brc_data.convert_to_ids(vocab)
     logger.info('Restoring the model...')
